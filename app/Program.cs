@@ -1,3 +1,5 @@
+using Prometheus;
+
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
@@ -8,6 +10,17 @@ var orders = new Dictionary<int, string>
     { 2, "Gadget" },
     { 3, "Gizmo" }
 };
+
+// Tracks request count + duration automatically (http_request_duration_seconds, etc.)
+app.UseHttpMetrics();
+
+// Exposes GET /metrics for Prometheus to scrape
+app.MapMetrics();
+
+// A custom counter, since we want to track failures specifically
+var failuresTotal = Metrics.CreateCounter(
+    "http_requests_failed_total",
+    "Total number of requests that resulted in a simulated failure");
 
 // Used by Kubernetes to know the pod is alive
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
@@ -33,6 +46,7 @@ app.MapGet("/api/orders/{id:int}", (int id, ILogger<Program> logger) =>
 app.MapGet("/api/failure", (ILogger<Program> logger) =>
 {
     logger.LogError("Simulated failure: database connection failed");
+    failuresTotal.Inc();
     return Results.Problem("Database connection failed", statusCode: 500);
 });
 
