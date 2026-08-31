@@ -1,43 +1,87 @@
-Now, Prometheus. We'll install it with Helm — same tool you already confirmed you have back in Step 1. Two commands, and I'll explain each before you run them:
+Grafana is not another metrics database — it's a visualization layer that can read from many different backends (Prometheus, Loki, and others) and turn queries into dashboards, panels, and eventually alerts. You've technically already queried Prometheus directly through its own basic UI (localhost:9090) — Grafana's job is to make that same data readable at a glance, and later, to show metrics and logs side by side, which Prometheus's own UI can't do.
 
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+First, register Grafana's chart repo — same pattern as before, just a different source:
+
+helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
 
-helm repo add ... — Helm doesn't ship Prometheus itself; it's a package manager, like apt or npm. This command tells Helm "here's a repository (a URL) where installable packages, called charts, live" — specifically the official community-maintained Prometheus chart.
+Run those two, then I'll walk through the install command and what it actually creates before you run it.
 
-helm repo update — refreshes Helm's local list of what's available in that repo, so it knows the latest chart version before you install anything.
 
-Neither of these installs anything into your cluster yet — they're just registering where to get it from. Run those two, then let me know it completed and I'll walk you through the actual install command next.
+Two things worth reading closely here, since they matter beyond just this lab.
 
-Let's actually define it properly instead of the one-liner I gave earlier.
+Getting the password:
 
-Helm is a package manager for Kubernetes — the same role apt plays for Ubuntu, npm for Node, or pip for Python. The problem it solves: a real application in Kubernetes is rarely one YAML file. Prometheus, for example, needs a Deployment, a Service, a ConfigMap (its scrape config), a ServiceAccount, RBAC permissions (so it's allowed to discover pods), possibly a PersistentVolumeClaim for storage — easily 10+ YAML files that all have to agree with each other.
+kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}" | base64 --decode
 
-Writing and maintaining all of that by hand for every tool you install would be brutal. So the community pre-packages it:
+This is your first real look at a Kubernetes Secret. When Helm installed Grafana, it auto-generated a random admin password and stored it as a Secret object in the cluster — not in a file on disk, not in the chart, inside Kubernetes itself, base64-encoded (not encrypted — base64 is just an encoding, easily reversible, which is exactly what --decode is undoing here). This command reaches into that Secret and pulls the raw password back out so you can actually use it.
 
-A chart is that bundle of YAML files, templated so values can be swapped in (like "how much memory should Prometheus get" or "what port should it listen on").
-A release is one specific installation of a chart into your cluster, with a name you choose.
-helm repo add (which you just ran) points Helm at a URL that hosts charts, so it knows where to fetch from.
+The warning is the important part, don't skip past it: "Persistence is disabled — you will lose your data when the Grafana pod is terminated." Right now, any dashboards you build live only inside this one running pod's filesystem. If it restarts — like every pod in this cluster already did once, a few hours ago — everything you built is gone. For this lab that's fine, low stakes, rebuild in a minute. But it's worth clocking now: this is the same "amnesia" problem you already understood with Prometheus counters, just one layer up — pods are inherently disposable in Kubernetes, and anything that needs to survive a restart has to be explicitly told to persist (a PersistentVolume, a real database, etc.).
 
-So when you run helm install prometheus prometheus-community/prometheus, Helm is going to fetch that whole bundle, fill in the template with sensible defaults, and apply all of those YAML files to your cluster in one shot — same end result as if you'd hand-written and kubectl apply'd 10+ files yourself, but someone already did that engineering work for you.
+Go run that password command, then port-forward:
 
-That's the actual install command, next. Ready to run it?
+kubectl --namespace monitoring port-forward svc/grafana 3000:80
 
-Here's what actually happens when this chart installs — worth knowing before the terminal fills up with pods you didn't expect:
+(I used the Service name svc/grafana rather than the $POD_NAME dance in the notes — same result, less typing, and you already know this pattern from demo-api and prometheus-server.)
 
-helm install prometheus prometheus-community/prometheus --namespace monitoring --create-namespace
+Log into http://localhost:3000 with admin and that password, and tell me you're in.
 
-Breaking down the command itself: helm install <release-name> <repo>/<chart-name> — you're naming this installation prometheus. --namespace monitoring puts everything it creates into a separate namespace (a way of grouping/isolating resources in Kubernetes) rather than dumping it in alongside your demo-api. --create-namespace tells Helm to create that namespace first, since it doesn't exist yet.
+Right — base64 is a Linux/macOS command-line tool; PowerShell doesn't ship it. PowerShell has its own way to do the same decode, using .NET directly:
 
-What it will actually create, several pods, not one:
+powershell
+$secret = kubectl get secret --namespace monitoring grafana -o jsonpath="{.data.admin-password}"
+[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($secret))
 
-prometheus-server — the actual Prometheus process, the thing that scrapes and stores metrics.
-prometheus-alertmanager — handles routing alerts (not something we'll use yet, but ships by default).
-prometheus-kube-state-metrics — watches the Kubernetes API itself and turns cluster state (pod counts, deployment status) into metrics.
-prometheus-prometheus-node-exporter — runs on every node, reports host-level metrics (CPU, memory, disk).
+Line 1 does exactly what it did before — pulls the base64-encoded password out of the Secret. Line 2 is PowerShell's equivalent of base64 --decode: FromBase64String converts it back to raw bytes, and UTF8.GetString turns those bytes into readable text.
 
-Plus, invisibly: a ServiceAccount and RBAC rules (ClusterRole/ClusterRoleBinding) that grant Prometheus permission to look at pods across your cluster — without these, it legally couldn't discover your demo-api pod at all, annotations or not.
+Run both lines, copy the password it prints, then port-forward and log in:
 
-Run it, then:
+kubectl --namespace monitoring port-forward svc/grafana 3000:80
 
-kubectl get pods -n monitoring
+Go to http://localhost:3000, username admin, and that password. Let me know once you're in.
+
+
+Connected. Now let's build one real panel, using a metric you already understand cold — no point starting with something new.
+
+Click that "building a dashboard" link Grafana gave you (or: Dashboards → New → New Dashboard → Add visualization → pick the Prometheus data source you just created).
+
+You'll land on a panel editor with a query box. In it, enter the same query you already ran and understood directly in Prometheus:
+
+rate(http_requests_failed_total[5m])
+
+This is worth noticing explicitly: you're not learning a new query language for Grafana. It's the exact same PromQL you already used in Prometheus's own UI. Grafana isn't a separate data system — it's a nicer window onto the same data, using the same queries. That's the whole value proposition in one sentence.
+
+Run it, and you should see a line graph appear — probably flat at 0 right now unless you've hit /api/failure recently.
+
+Give it a title (top right, something like "Failure Rate"), and save the dashboard.
+
+Then, to actually watch it move: open a new terminal, port-forward demo-api again, and curl /api/failure a handful of times in a loop. Watch the Grafana panel — it should tick upward within ~15-30 seconds (scrape interval, plus Grafana's own refresh).
+
+
+You're in — Grafana's running, but it's an empty shell right now: no data source, no dashboards. Two steps left to make it useful.
+
+Step 1: Connect Grafana to Prometheus.
+
+In the Grafana UI: left sidebar → Connections → Data sources → Add data source → choose Prometheus.
+
+It'll ask for a URL. This is worth pausing on, because it's a different address than the one you use in your browser. You reach Prometheus at localhost:9090 — but that only works because of your personal port-forward tunnel. Grafana isn't on your laptop; it's a pod running inside the cluster, right alongside Prometheus. So it should talk to Prometheus using Kubernetes' own internal DNS name, the same pattern you saw in the Helm install notes earlier:
+
+http://prometheus-server.monitoring.svc.cluster.local
+
+Break that down quickly since you'll see this pattern everywhere in Kubernetes: prometheus-server (Service name) .monitoring (the namespace it lives in) .svc.cluster.local (fixed suffix meaning "this is a Service, inside this cluster"). Any pod anywhere in the cluster can reach any Service using exactly this pattern, regardless of which node either one is running on.
+
+Enter that URL, scroll down, click Save & test. It should say something like "Successfully queried the Prometheus API."
+
+onnected. Now let's build one real panel, using a metric you already understand cold — no point starting with something new.
+
+Click that "building a dashboard" link Grafana gave you (or: Dashboards → New → New Dashboard → Add visualization → pick the Prometheus data source you just created).
+
+You'll land on a panel editor with a query box. In it, enter the same query you already ran and understood directly in Prometheus:
+
+rate(http_requests_failed_total[5m])
+
+This is worth noticing explicitly: you're not learning a new query language for Grafana. It's the exact same PromQL you already used in Prometheus's own UI. Grafana isn't a separate data system — it's a nicer window onto the same data, using the same queries. That's the whole value proposition in one sentence.
+
+Run it, and you should see a line graph appear — probably flat at 0 right now unless you've hit /api/failure recently.
+
+Give it a title (top right, something like "Failure Rate"), and save the dashboard.
