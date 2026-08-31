@@ -1,37 +1,43 @@
-Let's get the app running inside your actual kind cluster first — Prometheus needs something in Kubernetes to scrape, not just a container on your laptop.
+Now, Prometheus. We'll install it with Helm — same tool you already confirmed you have back in Step 1. Two commands, and I'll explain each before you run them:
 
-Created 2 files, ran a command, read a file
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
 
-Two small but important details in deployment.yaml, worth noting before you run anything:
+helm repo add ... — Helm doesn't ship Prometheus itself; it's a package manager, like apt or npm. This command tells Helm "here's a repository (a URL) where installable packages, called charts, live" — specifically the official community-maintained Prometheus chart.
 
-imagePullPolicy: Never — tells Kubernetes "don't try to download this image from a registry, it should already be sitting on the node." That matters because kind runs Kubernetes inside Docker, so your locally-built image isn't automatically visible to it — we have to explicitly hand it over (next step).
-The three prometheus.io/... annotations aren't magic Kubernetes fields — they're just labels. Prometheus's own scrape config (which we'll install in a minute) is written to look for them and auto-add any pod carrying them to its scrape list.
+helm repo update — refreshes Helm's local list of what's available in that repo, so it knows the latest chart version before you install anything.
 
-Put k8s/deployment.yaml and k8s/service.yaml into your holmes-lab/k8s/ folder. Then run this first batch — nothing Prometheus-related yet, just getting the app into the cluster:
+Neither of these installs anything into your cluster yet — they're just registering where to get it from. Run those two, then let me know it completed and I'll walk you through the actual install command next.
 
-docker build -t holmes-lab-demo-api:latest ./app
-kind load docker-image holmes-lab-demo-api:latest --name holmes-lab
-kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
-kubectl get pods
+Let's actually define it properly instead of the one-liner I gave earlier.
 
-That middle command — kind load docker-image — is the "hand it over" step I mentioned. Run those four and paste what kubectl get pods shows.
+Helm is a package manager for Kubernetes — the same role apt plays for Ubuntu, npm for Node, or pip for Python. The problem it solves: a real application in Kubernetes is rarely one YAML file. Prometheus, for example, needs a Deployment, a Service, a ConfigMap (its scrape config), a ServiceAccount, RBAC permissions (so it's allowed to discover pods), possibly a PersistentVolumeClaim for storage — easily 10+ YAML files that all have to agree with each other.
 
+Writing and maintaining all of that by hand for every tool you install would be brutal. So the community pre-packages it:
 
+A chart is that bundle of YAML files, templated so values can be swapped in (like "how much memory should Prometheus get" or "what port should it listen on").
+A release is one specific installation of a chart into your cluster, with a name you choose.
+helm repo add (which you just ran) points Helm at a URL that hosts charts, so it knows where to fetch from.
 
-docker build -t holmes-lab-demo-api:latest ./app
-This builds your Dockerfile into an actual image and tags it holmes-lab-demo-api:latest. You did this before via docker compose up --build — compose was doing this exact step for you behind the scenes. Now we're doing it directly because Kubernetes doesn't know what docker-compose is; it only understands raw images.
+So when you run helm install prometheus prometheus-community/prometheus, Helm is going to fetch that whole bundle, fill in the template with sensible defaults, and apply all of those YAML files to your cluster in one shot — same end result as if you'd hand-written and kubectl apply'd 10+ files yourself, but someone already did that engineering work for you.
 
-kind load docker-image holmes-lab-demo-api:latest --name holmes-lab
-This is the one that's genuinely new. Here's the problem it solves: kind runs your whole Kubernetes cluster inside a Docker container (remember the "Docker → Kind → Kubernetes cluster" diagram from Step 2). That means the cluster has its own separate, sealed-off image storage — it can't see images sitting in your regular Docker Desktop. kind load docker-image physically copies your image into that sealed environment. Skip this step and Kubernetes will try to pull holmes-lab-demo-api:latest from the internet, fail, and your pod will sit in ErrImageNeverPull.
+That's the actual install command, next. Ready to run it?
 
+Here's what actually happens when this chart installs — worth knowing before the terminal fills up with pods you didn't expect:
 
-kubectl apply -f k8s/deployment.yaml -f k8s/service.yaml
-This is where Kubernetes actually gets told what you want to exist. apply reads both YAML files and says "make the cluster's state match this" — create the Deployment (which creates a Pod running your container) and the Service (a stable internal address for it). This is the same idea as docker compose up, just Kubernetes' version of it, and split into two separate objects instead of one file.
+helm install prometheus prometheus-community/prometheus --namespace monitoring --create-namespace
 
-kubectl get pods
-Just a status check — lists pods and their current state (Pending, ContainerCreating, Running, CrashLoopBackOff, etc.), so you can confirm the deployment actually worked before moving on.
+Breaking down the command itself: helm install <release-name> <repo>/<chart-name> — you're naming this installation prometheus. --namespace monitoring puts everything it creates into a separate namespace (a way of grouping/isolating resources in Kubernetes) rather than dumping it in alongside your demo-api. --create-namespace tells Helm to create that namespace first, since it doesn't exist yet.
 
-Order matters here: build → load → apply. If you apply before the image is loaded, the pod will fail to start, and you'd have to delete and reapply anyway.
+What it will actually create, several pods, not one:
 
+prometheus-server — the actual Prometheus process, the thing that scrapes and stores metrics.
+prometheus-alertmanager — handles routing alerts (not something we'll use yet, but ships by default).
+prometheus-kube-state-metrics — watches the Kubernetes API itself and turns cluster state (pod counts, deployment status) into metrics.
+prometheus-prometheus-node-exporter — runs on every node, reports host-level metrics (CPU, memory, disk).
 
-Kubernetes Service with no type specified defaults to ClusterIP, which means: reachable only from other things inside the cluster, not from your laptop. That's deliberate — in a real cluster, most services (databases, internal APIs) should never be reachable from outside at all.
+Plus, invisibly: a ServiceAccount and RBAC rules (ClusterRole/ClusterRoleBinding) that grant Prometheus permission to look at pods across your cluster — without these, it legally couldn't discover your demo-api pod at all, annotations or not.
+
+Run it, then:
+
+kubectl get pods -n monitoring
